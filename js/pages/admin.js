@@ -137,8 +137,9 @@
       API.getPlatformAccounts(),
       API.getVisitorAnalytics(),
       API.getAllSellersForAdmin(),
-      API.getReports()
-    ]).then(([products, txns, cats, orders, wallet, cfg, analytics, sellers, reports]) => {
+      API.getReports(),
+      API.getUserWallets()
+    ]).then(([products, txns, cats, orders, wallet, cfg, analytics, sellers, reports, userWallets]) => {
       allProducts = products;
       allTxns = txns;
       allCategories = cats;
@@ -147,6 +148,7 @@
       renderPendingProducts();
       renderPendingDeposits();
       renderPendingWithdraws();
+      renderUserWallets(userWallets);
       renderVisitorAnalytics(analytics);
       renderCategories();
       renderCatalogEditor();
@@ -685,6 +687,85 @@
       };
     });
   }
+
+  // ---------- USER WALLETS & BALANCES MANAGEMENT ----------
+  function renderUserWallets(wallets = {}) {
+    const table = document.getElementById("userWalletsTable");
+    const countEl = document.getElementById("cUserWallets");
+    const keys = Object.keys(wallets || {});
+    if (countEl) countEl.textContent = keys.length;
+    if (!table) return;
+
+    if (!keys.length) {
+      table.innerHTML = `<tr><td colspan="6" class="dim" style="text-align:center; padding:24px;">No active user wallets yet.</td></tr>`;
+      return;
+    }
+
+    table.innerHTML = `
+      <thead>
+        <tr>
+          <th>Account Key / Phone</th>
+          <th>Available Balance</th>
+          <th>Total Deposited</th>
+          <th>Sales Earned</th>
+          <th>Pending Withdraw</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${keys
+          .map((k) => {
+            const w = wallets[k] || {};
+            const isPhone = k.startsWith("phone_");
+            const displayName = isPhone ? `📱 ${k.replace("phone_", "")}` : `💻 Device: ${k}`;
+            return `
+              <tr>
+                <td>
+                  <b class="mono" style="color:var(--text);">${UI.esc(displayName)}</b>
+                </td>
+                <td>
+                  <b class="fw700" style="color:var(--green); font-size:15px;">${UI.money(w.balance || 0)}</b>
+                </td>
+                <td class="dim fs13">${UI.money(w.totalDeposited || 0)}</td>
+                <td class="fs13" style="color:var(--cyan);">${UI.money(w.totalEarned || 0)}</td>
+                <td class="fs13" style="color:var(--amber);">${UI.money(w.pendingWithdraw || 0)}</td>
+                <td>
+                  <button class="btn btn-outline btn-sm edit-wallet-bal-btn" data-key="${UI.esc(k)}" data-bal="${w.balance || 0}" style="padding:4px 10px;">
+                    ✏️ Edit Balance
+                  </button>
+                </td>
+              </tr>
+            `;
+          })
+          .join("")}
+      </tbody>
+    `;
+
+    table.querySelectorAll(".edit-wallet-bal-btn").forEach((btn) => {
+      btn.onclick = () => {
+        const key = btn.dataset.key;
+        const cur = btn.dataset.bal;
+        const input = prompt(`Enter new available balance for account [${key}]:`, cur);
+        if (input !== null && input.trim() !== "") {
+          const num = Number(input.trim());
+          if (isNaN(num) || num < 0) {
+            return UI.toast("Invalid balance number.", "err");
+          }
+          API.setUserWalletBalance(key, num).then(() => {
+            UI.toast(`Wallet balance for [${key}] updated to ৳${num}!`, "success");
+            loadAll();
+          });
+        }
+      };
+    });
+  }
+
+  document.getElementById("refreshWalletsBtn")?.addEventListener("click", () => {
+    API.getUserWallets().then((wallets) => {
+      renderUserWallets(wallets);
+      UI.toast("User wallet balances refreshed!", "success");
+    });
+  });
 
   // ---------- 4. Visitor Analytics & Real-Time Monitoring ----------
   function renderVisitorAnalytics(analytics = {}) {

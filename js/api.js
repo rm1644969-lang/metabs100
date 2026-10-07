@@ -39,6 +39,9 @@ const API = (() => {
       minWithdraw: 50
     },
 
+    // Multi-user / multi-device isolated wallets
+    userWallets: {},
+
     // Platform payment accounts (Set by Admin)
     platformAccounts: {
       bkash: "01609166109",
@@ -142,6 +145,25 @@ const API = (() => {
   }
   window.playNotificationAudio = playNotificationAudio;
 
+  // Persistent Unique Device / User ID (prevents cross-device account conflation)
+  let deviceId = "usr_guest";
+  try {
+    deviceId = localStorage.getItem("RTN_DEVICE_USER_ID");
+    if (!deviceId) {
+      deviceId = "usr_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 7);
+      localStorage.setItem("RTN_DEVICE_USER_ID", deviceId);
+    }
+  } catch (e) {
+    deviceId = "usr_" + Math.random().toString(36).slice(2, 8);
+  }
+
+  function getUserWalletKey(user) {
+    if (!user) return deviceId;
+    const cleanPhone = (user.whatsapp || "").replace(/[^0-9]/g, "");
+    if (cleanPhone && cleanPhone.length >= 10) return "phone_" + cleanPhone;
+    return user.id || deviceId;
+  }
+
   // Load from LocalStorage if exists
   let store;
   try {
@@ -156,6 +178,14 @@ const API = (() => {
     if (!Array.isArray(store.sellers)) store.sellers = [];
     if (!Array.isArray(store.orders)) store.orders = [];
     if (!Array.isArray(store.transactions)) store.transactions = [];
+    if (!store.userWallets || typeof store.userWallets !== "object") store.userWallets = {};
+
+    // Ensure device has its own unique user ID if still using legacy shared default
+    if (store.user) {
+      if ((!store.user.id || store.user.id === "usr_rtn_01") && !store.user.isAdmin) {
+        store.user.id = deviceId;
+      }
+    }
 
     // Clean Launch: Remove any legacy dummy products (P1001, P1003, P1004, P1005 with no real accounts)
     if (Array.isArray(store.products)) {
@@ -201,6 +231,27 @@ const API = (() => {
     }
   } catch (e) {
     store = JSON.parse(JSON.stringify(defaultStore));
+  }
+
+  function getActiveUserWallet() {
+    if (!store.userWallets || typeof store.userWallets !== "object") {
+      store.userWallets = {};
+    }
+    const key = getUserWalletKey(store.user);
+    if (!store.userWallets[key]) {
+      store.userWallets[key] = {
+        balance: (store.wallet && typeof store.wallet.balance === "number") ? store.wallet.balance : 0.0,
+        pendingWithdraw: (store.wallet && typeof store.wallet.pendingWithdraw === "number") ? store.wallet.pendingWithdraw : 0.0,
+        totalEarned: (store.wallet && typeof store.wallet.totalEarned === "number") ? store.wallet.totalEarned : 0.0,
+        totalDeposited: (store.wallet && typeof store.wallet.totalDeposited === "number") ? store.wallet.totalDeposited : 0.0,
+        totalWithdrawn: (store.wallet && typeof store.wallet.totalWithdrawn === "number") ? store.wallet.totalWithdrawn : 0.0,
+        currency: "৳",
+        minDeposit: 50,
+        minWithdraw: 50
+      };
+    }
+    store.wallet = store.userWallets[key];
+    return store.userWallets[key];
   }
 
   // Ensure notifications array exists
@@ -306,11 +357,12 @@ const API = (() => {
             if (Array.isArray(remoteStore.transactions) && remoteStore.transactions.length > 0) {
               store.transactions = remoteStore.transactions;
             }
-            if (remoteStore.wallet && typeof remoteStore.wallet === "object") {
-              store.wallet = Object.assign(store.wallet || {}, remoteStore.wallet);
-            }
             if (remoteStore.userWallets && typeof remoteStore.userWallets === "object") {
               store.userWallets = Object.assign(store.userWallets || {}, remoteStore.userWallets);
+              const myKey = getUserWalletKey(store.user);
+              if (store.userWallets[myKey]) {
+                store.wallet = store.userWallets[myKey];
+              }
             }
             if (Array.isArray(remoteStore.orders) && remoteStore.orders.length > 0) {
               store.orders = remoteStore.orders;
@@ -349,6 +401,7 @@ const API = (() => {
     updateProfile(patch) {
       return wait().then(() => {
         const oldName = store.user.name;
+        const oldKey = getUserWalletKey(store.user);
         Object.assign(store.user, patch);
 
         // Automatic Admin Recognition (Number: 01609166109)
@@ -362,6 +415,16 @@ const API = (() => {
           store.user.isAdmin = false;
           store.user.role = "Seller";
           try { sessionStorage.removeItem("rtn_admin_auth"); } catch (e) {}
+        }
+
+        const newKey = getUserWalletKey(store.user);
+        if (oldKey !== newKey && store.userWallets) {
+          if (store.userWallets[newKey]) {
+            store.wallet = store.userWallets[newKey];
+          } else if (store.userWallets[oldKey]) {
+            store.userWallets[newKey] = store.userWallets[oldKey];
+            store.wallet = store.userWallets[newKey];
+          }
         }
 
         // Automatically sync name, username, whatsapp & photo/avatar to seller entity if exists
@@ -385,49 +448,8 @@ const API = (() => {
     // Wallet & Platform Config
     getWallet() {
       return wait().then(() => {
-        if (!store.wallet) {
-          store.wallet = { balance: 0.0, pendingWithdraw: 0.0, totalEarned: 0.0, currency: "৳", minDeposit: 50, minWithdraw: 50 };
-        }
-
-        // Automatic ledger reconciliation: ensure wallet balance reflects approved deposits & earnings
-        if (Array.isArray(store.transactions) && store.transactions.length > 0) {
-          const totalDepositedTxns = store.transactions
-            .filter((t) => t.type === "deposit" && t.status === "success")
-            .reduce((sum, t) => sum + (Number(t.amount) || 0), 0);
-
-          const totalSpentTxns = store.transactions
-            .filter((t) => (t.type === "purchase" || t.type === "withdraw") && t.status === "success")
-            .reduce((sum, t) => sum + (Number(t.amount) || 0), 0);
-
-          const totalSalesEarned = store.transactions
-            .filter((t) => (t.type === "sale" || t.type === "commission") && t.status === "success")
-            .reduce((sum, t) => sum + (Number(t.amount) || 0), 0);
-
-          const expectedBalance = Math.max(0, Number((totalDepositedTxns + totalSalesEarned - totalSpentTxns).toFixed(2)));
-          if (expectedBalance > (store.wallet.balance || 0)) {
-            store.wallet.balance = expectedBalance;
-            store.wallet.totalDeposited = Number(totalDepositedTxns.toFixed(2));
-            saveLocal();
-          }
-        }
-
-        if (Array.isArray(store.sellers)) {
-          const currentUserName = (store.user && store.user.name || "").toLowerCase();
-          const currentUserPhone = (store.user && store.user.whatsapp || "").replace(/[^0-9]/g, "");
-          const mySeller = store.sellers.find((s) =>
-            (s.name && s.name.toLowerCase() === currentUserName) ||
-            (currentUserPhone && s.whatsapp && s.whatsapp.replace(/[^0-9]/g, "") === currentUserPhone)
-          );
-          if (mySeller && typeof mySeller.balance === "number") {
-            if (mySeller.balance > (store.wallet.balance || 0)) {
-              store.wallet.balance = mySeller.balance;
-            } else if ((store.wallet.balance || 0) > mySeller.balance) {
-              mySeller.balance = store.wallet.balance;
-            }
-            saveLocal();
-          }
-        }
-        return clone(store.wallet);
+        const w = getActiveUserWallet();
+        return clone(w);
       });
     },
 
@@ -877,9 +899,10 @@ const API = (() => {
         const qty = Math.max(1, Number(quantity) || 1);
         if (p.stock < qty) throw new Error("স্টক অপর্যাপ্ত। পর্যাপ্ত অ্যাকাউন্ট পুলে নেই।");
 
+        const activeW = getActiveUserWallet();
         const totalCost = Number((p.price * qty).toFixed(2));
-        if (store.wallet.balance < totalCost) {
-          throw new Error(`Insufficient deposit balance. Required: ৳${totalCost}, Available: ৳${store.wallet.balance}`);
+        if (activeW.balance < totalCost) {
+          throw new Error(`Insufficient deposit balance. Required: ৳${totalCost}, Available: ৳${activeW.balance}`);
         }
 
         if (!Array.isArray(p.accountsPool)) p.accountsPool = [];
@@ -921,8 +944,13 @@ const API = (() => {
           }
         }
 
-        // Deduct from buyer's wallet balance
-        store.wallet.balance = Number((store.wallet.balance - totalCost).toFixed(2));
+        // Deduct from buyer's active wallet balance (Balance strictly decreases)
+        activeW.balance = Math.max(0, Number((activeW.balance - totalCost).toFixed(2)));
+        store.wallet.balance = activeW.balance;
+        const buyerKey = getUserWalletKey(store.user);
+        if (store.userWallets && store.userWallets[buyerKey]) {
+          store.userWallets[buyerKey].balance = activeW.balance;
+        }
 
         // Format credentials & credit earnings to sellers + admin profit margin
         const delivered = [];
@@ -952,34 +980,9 @@ const API = (() => {
         p.stock = Math.max(0, p.accountsPool.length);
         p.sold = (p.sold || 0) + qty;
 
-        // Credit seller(s) with seller payout (e.g. ৳0.40/unit)
+        // Credit seller directory & distinct seller wallet (NEVER inflate buyer's active purchase balance)
         for (const [sName, amount] of Object.entries(sellerShares)) {
           const credAmount = Number(amount.toFixed(2));
-          const currentUserName = (store.user && store.user.name || "").toLowerCase();
-          const currentUserPhone = (store.user && store.user.whatsapp || "").replace(/[^0-9]/g, "");
-          const isMySale = sName === "You" ||
-                           sName.toLowerCase() === currentUserName ||
-                           (currentUserPhone && (sName.includes(currentUserPhone) || (currentUserPhone === "01609166109" && sName.toLowerCase().includes("admin")))) ||
-                           (store.user && store.user.isAdmin && (sName.toLowerCase().includes("admin") || sName.toLowerCase().includes("ratan")));
-
-          if (isMySale) {
-            store.wallet.balance = Number((store.wallet.balance + credAmount).toFixed(2));
-            store.wallet.totalEarned = Number(((store.wallet.totalEarned || 0) + credAmount).toFixed(2));
-            store.user.salesCount = (store.user.salesCount || 0) + qty;
-
-            // Record seller sales transaction
-            store.transactions.unshift({
-              id: "TXN-" + Math.floor(71000 + Math.random() * 9000),
-              type: "sale",
-              method: "Auto-Sale Credit (অ্যাকাউন্ট বিক্রি)",
-              number: "Platform Auto-Credit",
-              amount: credAmount,
-              status: "success",
-              date: new Date().toLocaleString(),
-              ref: "SALE-" + Math.floor(9200 + Math.random() * 800),
-              title: `Sold ${qty} account(s) from ${p.title} (Payout: ৳${(credAmount / qty).toFixed(2)}/unit | Market: ৳${p.price.toFixed(2)})`
-            });
-          }
 
           // Update sellers directory & seller individual balance
           if (Array.isArray(store.sellers)) {
@@ -989,28 +992,16 @@ const API = (() => {
               sellerObj.activeStock = Math.max(0, (sellerObj.activeStock || 0) - countSold);
               sellerObj.soldCount = (sellerObj.soldCount || 0) + countSold;
               sellerObj.balance = Number(((sellerObj.balance || 0) + credAmount).toFixed(2));
-            }
-          }
-        }
+              sellerObj.totalEarned = Number(((sellerObj.totalEarned || 0) + credAmount).toFixed(2));
 
-        // Credit Admin profit if regular seller product was sold
-        if (totalAdminProfit > 0) {
-          const cleanPhone = (store.user?.whatsapp || "").replace(/[^0-9]/g, "");
-          const isAdminUser = (store.user && store.user.isAdmin) || cleanPhone === "01609166109" || (store.user && (store.user.name || "").toLowerCase().includes("admin"));
-          if (isAdminUser) {
-            store.wallet.balance = Number((store.wallet.balance + totalAdminProfit).toFixed(2));
-            store.wallet.totalEarned = Number(((store.wallet.totalEarned || 0) + totalAdminProfit).toFixed(2));
-            store.transactions.unshift({
-              id: "TXN-" + Math.floor(81000 + Math.random() * 9000),
-              type: "commission",
-              method: "Admin Profit (প্ল্যাটফর্ম লাভ)",
-              number: "RTN Escrow Commission",
-              amount: totalAdminProfit,
-              status: "success",
-              date: new Date().toLocaleString(),
-              ref: "PROFIT-" + Math.floor(9200 + Math.random() * 800),
-              title: `Admin Profit: ৳${totalAdminProfit} (৳0.10/unit commission from ${qty} accounts sold at ৳${p.price.toFixed(2)})`
-            });
+              // If seller has a distinct wallet from buyer, credit their seller wallet
+              const sPhone = (sellerObj.whatsapp || "").replace(/[^0-9]/g, "");
+              const sellerWalletKey = (sPhone && sPhone.length >= 10 ? ("phone_" + sPhone) : "") || sellerObj.id;
+              if (sellerWalletKey && sellerWalletKey !== buyerKey && store.userWallets && store.userWallets[sellerWalletKey]) {
+                store.userWallets[sellerWalletKey].balance = Number(((store.userWallets[sellerWalletKey].balance || 0) + credAmount).toFixed(2));
+                store.userWallets[sellerWalletKey].totalEarned = Number(((store.userWallets[sellerWalletKey].totalEarned || 0) + credAmount).toFixed(2));
+              }
+            }
           }
         }
 
@@ -1023,7 +1014,10 @@ const API = (() => {
           quantity: qty,
           amount: totalCost,
           unitPrice: p.price,
-          buyer: "You",
+          buyer: store.user.name || "You",
+          buyerPhone: store.user.whatsapp || "",
+          buyerKey: buyerKey,
+          userId: store.user.id,
           seller: sellerName || (deliveredRaw[0]?.sellerName || p.seller?.name || "RTN Pooled Sellers"),
           status: "delivered",
           date: new Date().toLocaleString(),
@@ -1065,10 +1059,12 @@ const API = (() => {
     createDeposit({ method, number, amount, ref }) {
       return wait(250).then(() => {
         const amt = Number(amount);
-        if (amt < store.wallet.minDeposit) {
-          throw new Error(`Minimum deposit amount is ৳${store.wallet.minDeposit}`);
+        const w = getActiveUserWallet();
+        if (amt < w.minDeposit) {
+          throw new Error(`Minimum deposit amount is ৳${w.minDeposit}`);
         }
 
+        const userKey = getUserWalletKey(store.user);
         const txn = {
           id: "TXN-" + Math.floor(61000 + Math.random() * 9000),
           type: "deposit",
@@ -1078,7 +1074,8 @@ const API = (() => {
           status: "pending", // goes to Admin for review
           date: new Date().toLocaleString(),
           ref: ref || ("TRX" + Math.random().toString(36).slice(2, 8).toUpperCase()),
-          userId: store.user?.id || "usr_rtn_01",
+          userKey,
+          userId: store.user?.id || deviceId,
           userName: store.user?.name || "User",
           userPhone: (store.user?.whatsapp || number || "").replace(/[^0-9]/g, "")
         };
@@ -1102,20 +1099,29 @@ const API = (() => {
         const txn = store.transactions.find((t) => t.id === txnId);
         if (txn && txn.type === "deposit" && txn.status === "pending") {
           txn.status = "success";
-          store.wallet.balance = Number(((store.wallet.balance || 0) + txn.amount).toFixed(2));
-          store.wallet.totalDeposited = Number(((store.wallet.totalDeposited || 0) + txn.amount).toFixed(2));
+          const depositorKey = txn.userKey || (txn.userPhone && txn.userPhone.length >= 10 ? ("phone_" + txn.userPhone) : "") || txn.userId;
+          if (!store.userWallets) store.userWallets = {};
+          if (!store.userWallets[depositorKey]) {
+            store.userWallets[depositorKey] = {
+              balance: 0.0,
+              pendingWithdraw: 0.0,
+              totalEarned: 0.0,
+              totalDeposited: 0.0,
+              totalWithdrawn: 0.0,
+              currency: "৳",
+              minDeposit: 50,
+              minWithdraw: 50
+            };
+          }
+          const depWallet = store.userWallets[depositorKey];
+          depWallet.balance = Number(((depWallet.balance || 0) + txn.amount).toFixed(2));
+          depWallet.totalDeposited = Number(((depWallet.totalDeposited || 0) + txn.amount).toFixed(2));
 
-          // Sync matching seller balance if user is also a seller
-          if (Array.isArray(store.sellers)) {
-            const uName = (txn.userName || store.user?.name || "").toLowerCase();
-            const uPhone = (txn.userPhone || txn.number || store.user?.whatsapp || "").replace(/[^0-9]/g, "");
-            const mySeller = store.sellers.find((s) =>
-              (uName && s.name && s.name.toLowerCase() === uName) ||
-              (uPhone && s.whatsapp && s.whatsapp.replace(/[^0-9]/g, "") === uPhone)
-            );
-            if (mySeller) {
-              mySeller.balance = store.wallet.balance;
-            }
+          // If current active user is the depositor, update active wallet
+          const myKey = getUserWalletKey(store.user);
+          if (myKey === depositorKey || store.user?.id === txn.userId) {
+            store.wallet.balance = depWallet.balance;
+            store.wallet.totalDeposited = depWallet.totalDeposited;
           }
 
           saveLocal();
@@ -1124,7 +1130,7 @@ const API = (() => {
 
           addNotificationInternal({
             title: "📥 Deposit Confirmed! (ডিপোজিট সফল)",
-            message: `এডমিন আপনার ৳${txn.amount} ডিপোজিট অনুমোদন করেছেন (${txn.method} - TrxID: ${txn.ref})। বর্তমান ওয়ালেট ব্যালেন্স: ৳${store.wallet.balance}।`,
+            message: `এডমিন আপনার ৳${txn.amount} ডিপোজিট অনুমোদন করেছেন (${txn.method} - TrxID: ${txn.ref})। বর্তমান ওয়ালেট ব্যালেন্স: ৳${depWallet.balance}।`,
             type: "deposit",
             link: "wallet.html"
           });
@@ -1139,15 +1145,23 @@ const API = (() => {
     createWithdraw({ method, number, amount }) {
       return wait(250).then(() => {
         const amt = Number(amount);
-        if (amt < store.wallet.minWithdraw) {
-          throw new Error(`Minimum withdrawal amount is ৳${store.wallet.minWithdraw}`);
+        const activeW = getActiveUserWallet();
+        if (amt < activeW.minWithdraw) {
+          throw new Error(`Minimum withdrawal amount is ৳${activeW.minWithdraw}`);
         }
-        if (amt > store.wallet.balance) {
+        if (amt > activeW.balance) {
           throw new Error("Insufficient available wallet balance");
         }
 
-        store.wallet.balance = Number((store.wallet.balance - amt).toFixed(2));
-        store.wallet.pendingWithdraw = Number((store.wallet.pendingWithdraw + amt).toFixed(2));
+        activeW.balance = Number((activeW.balance - amt).toFixed(2));
+        activeW.pendingWithdraw = Number((activeW.pendingWithdraw + amt).toFixed(2));
+        store.wallet.balance = activeW.balance;
+        store.wallet.pendingWithdraw = activeW.pendingWithdraw;
+        const userKey = getUserWalletKey(store.user);
+        if (store.userWallets && store.userWallets[userKey]) {
+          store.userWallets[userKey].balance = activeW.balance;
+          store.userWallets[userKey].pendingWithdraw = activeW.pendingWithdraw;
+        }
 
         const txn = {
           id: "TXN-" + Math.floor(61000 + Math.random() * 9000),
@@ -1158,6 +1172,8 @@ const API = (() => {
           status: "pending",
           date: new Date().toLocaleString(),
           ref: "WD-" + Math.random().toString(36).slice(2, 8).toUpperCase(),
+          userKey,
+          userId: store.user.id,
           sellerName: store.user.name,
           sellerWhatsapp: store.user.whatsapp || "01609166109"
         };
@@ -1182,8 +1198,17 @@ const API = (() => {
         const txn = store.transactions.find((t) => t.id === txnId);
         if (txn && txn.type === "withdraw" && txn.status === "pending") {
           txn.status = "success";
-          store.wallet.pendingWithdraw = Math.max(0, Number((store.wallet.pendingWithdraw - txn.amount).toFixed(2)));
-          store.wallet.totalWithdrawn = Number(((store.wallet.totalWithdrawn || 0) + txn.amount).toFixed(2));
+          const userKey = txn.userKey || (txn.sellerWhatsapp ? ("phone_" + txn.sellerWhatsapp.replace(/\D/g, "")) : "") || txn.userId;
+          if (store.userWallets && store.userWallets[userKey]) {
+            const w = store.userWallets[userKey];
+            w.pendingWithdraw = Math.max(0, Number((w.pendingWithdraw - txn.amount).toFixed(2)));
+            w.totalWithdrawn = Number(((w.totalWithdrawn || 0) + txn.amount).toFixed(2));
+          }
+          const myKey = getUserWalletKey(store.user);
+          if (myKey === userKey || store.user?.id === txn.userId) {
+            store.wallet.pendingWithdraw = Math.max(0, Number((store.wallet.pendingWithdraw - txn.amount).toFixed(2)));
+            store.wallet.totalWithdrawn = Number(((store.wallet.totalWithdrawn || 0) + txn.amount).toFixed(2));
+          }
           saveLocal();
           document.dispatchEvent(new CustomEvent("wallet:updated"));
 
@@ -1206,10 +1231,19 @@ const API = (() => {
         if (txn && txn.status === "pending") {
           txn.status = "failed";
           txn.rejectReason = reason;
+          const userKey = txn.userKey || (txn.userPhone ? ("phone_" + txn.userPhone) : "") || txn.userId;
           if (txn.type === "withdraw") {
-            // refund to available balance
-            store.wallet.pendingWithdraw = Math.max(0, Number((store.wallet.pendingWithdraw - txn.amount).toFixed(2)));
-            store.wallet.balance = Number((store.wallet.balance + txn.amount).toFixed(2));
+            // refund to user's wallet
+            if (store.userWallets && store.userWallets[userKey]) {
+              const w = store.userWallets[userKey];
+              w.pendingWithdraw = Math.max(0, Number((w.pendingWithdraw - txn.amount).toFixed(2)));
+              w.balance = Number(((w.balance || 0) + txn.amount).toFixed(2));
+            }
+            const myKey = getUserWalletKey(store.user);
+            if (myKey === userKey || store.user?.id === txn.userId) {
+              store.wallet.pendingWithdraw = Math.max(0, Number((store.wallet.pendingWithdraw - txn.amount).toFixed(2)));
+              store.wallet.balance = Number((store.wallet.balance + txn.amount).toFixed(2));
+            }
 
             addNotificationInternal({
               title: "❌ Withdrawal Rejected & Refunded (উত্তোলন বাতিল)",
@@ -1664,8 +1698,23 @@ const API = (() => {
 
         // Credit Buyer Wallet
         if (refundAmt > 0) {
-          if (!store.wallet) store.wallet = { balance: 0, pendingWithdraw: 0, totalEarned: 0 };
-          store.wallet.balance = Math.round(((store.wallet.balance || 0) + refundAmt) * 100) / 100;
+          const buyerKey = (ord && (ord.buyerKey || (ord.buyerPhone && ("phone_" + ord.buyerPhone.replace(/\D/g, ""))))) || (r && r.buyerKey) || getUserWalletKey(store.user);
+          if (!store.userWallets) store.userWallets = {};
+          if (!store.userWallets[buyerKey]) {
+            store.userWallets[buyerKey] = {
+              balance: 0.0,
+              pendingWithdraw: 0.0,
+              totalEarned: 0.0,
+              currency: "৳",
+              minDeposit: 50,
+              minWithdraw: 50
+            };
+          }
+          const bW = store.userWallets[buyerKey];
+          bW.balance = Math.round(((bW.balance || 0) + refundAmt) * 100) / 100;
+          if (buyerKey === getUserWalletKey(store.user)) {
+            store.wallet.balance = bW.balance;
+          }
 
           // Log Refund Transaction
           if (!Array.isArray(store.transactions)) store.transactions = [];
@@ -1981,6 +2030,41 @@ const API = (() => {
       });
     },
 
+    // User Wallets & Multi-device Balance Management
+    getUserWallets() {
+      return wait().then(() => {
+        getActiveUserWallet();
+        return clone(store.userWallets || {});
+      });
+    },
+
+    setUserWalletBalance(userKey, newBalance) {
+      return wait().then(() => {
+        if (!store.userWallets) store.userWallets = {};
+        if (!store.userWallets[userKey]) {
+          store.userWallets[userKey] = {
+            balance: 0.0,
+            pendingWithdraw: 0.0,
+            totalEarned: 0.0,
+            totalDeposited: 0.0,
+            totalWithdrawn: 0.0,
+            currency: "৳",
+            minDeposit: 50,
+            minWithdraw: 50
+          };
+        }
+        const bal = Math.max(0, Number(Number(newBalance).toFixed(2)) || 0);
+        store.userWallets[userKey].balance = bal;
+        const myKey = getUserWalletKey(store.user);
+        if (myKey === userKey) {
+          store.wallet.balance = bal;
+        }
+        saveLocal();
+        document.dispatchEvent(new CustomEvent("wallet:updated"));
+        return clone(store.userWallets[userKey]);
+      });
+    },
+
     // Reset Store (for testing / reset)
     resetStore() {
       localStorage.removeItem(STORAGE_KEY);
@@ -1996,6 +2080,7 @@ const API = (() => {
       store.transactions = [];
       store.deposits = [];
       store.withdrawals = [];
+      store.userWallets = {};
       store.wallet = { balance: 0, onHold: 0, totalDeposited: 0, totalWithdrawn: 0, totalEarned: 0 };
       saveLocal();
       location.reload();

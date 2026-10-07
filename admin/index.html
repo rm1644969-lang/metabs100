@@ -95,6 +95,11 @@
             <span>Pending Withdrawals</span>
             <span class="nav-count" id="cPendingWd">0</span>
           </button>
+          <button class="admin-nav-item tab" data-panel="user-wallets">
+            <span style="font-size:16px;">💳</span>
+            <span>User Wallets & Balances</span>
+            <span class="nav-count" id="cUserWallets">0</span>
+          </button>
 
           <div class="dim fs11 text-uppercase fw700 mt14 mb6" style="letter-spacing:1px; padding:0 8px;">Analytics & Traffic</div>
           <button class="admin-nav-item tab" data-panel="visitor-analytics">
@@ -178,6 +183,22 @@
             <div class="card__body">
               <div class="table-wrap">
                 <table class="data" id="pendingWithdrawsTable"></table>
+              </div>
+            </div>
+          </div>
+
+          <!-- USER WALLETS & BALANCES -->
+          <div class="card glow-card admin-panel" id="panel-user-wallets" hidden>
+            <div class="card__head flex jb ac" style="flex-wrap:wrap; gap:12px;">
+              <div>
+                <h3>User Accounts & Wallet Balances (ইউজারদের ওয়ালেট ব্যালেন্স)</h3>
+                <div class="sub">View and manually adjust balances for any device, phone number, or buyer account.</div>
+              </div>
+              <button class="btn btn-outline btn-sm" id="refreshWalletsBtn">🔄 Refresh Balances</button>
+            </div>
+            <div class="card__body">
+              <div class="table-wrap">
+                <table class="data" id="userWalletsTable"></table>
               </div>
             </div>
           </div>
