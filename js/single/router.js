@@ -48,6 +48,10 @@ const Router = (() => {
     document.title = route.title;
     setActiveNav(route.nav);
     updatePendingBadge();
+    API.getWallet().then((w) => {
+      const hb = document.getElementById("hdrBalance");
+      if (hb) hb.textContent = UI.money(w.balance);
+    });
     const pageFn = INIT[name] || ((name === "" || name === "home" || name === "marketplace" || name === "browse") ? (INIT[""] || INIT["home"] || window.initHome) : null);
     if (typeof pageFn === "function") pageFn();
     window.scrollTo(0, 0);
@@ -121,6 +125,9 @@ const Router = (() => {
         <button class="btn btn-ghost btn-sm" onclick="window.UI && window.UI.openMetaAiBox && window.UI.openMetaAiBox()" title="Open Meta AI Assistant Box" style="color:#38bdf8; border:1px solid rgba(56,189,248,0.3); border-radius:20px; padding:4px 10px; display:inline-flex; align-items:center; gap:6px; background:rgba(0,100,224,0.12);">
           <img src="assets/meta-ai-logo.png" style="width:16px; height:16px; border-radius:50%;" class="meta-ai-orb-spin" alt="">
           <span class="fs12" style="font-weight:700;">AI Box</span>
+        </button>
+        <button class="icon-btn theme-toggle-btn" id="themeToggleBtn" title="Toggle Black / White Mode (ডার্ক / লাইট মোড)">
+          <span class="theme-icon">${(document.documentElement.getAttribute("data-theme") || localStorage.getItem("rtn_theme") || "light") === "light" ? "🌙" : "☀️"}</span>
         </button>
         <a href="#/wallet" class="balance-chip" title="Wallet balance (Deposit / DP)">
           ${ICONS.wallet}<span class="b-text" id="hdrBalance">৳0</span>
@@ -200,6 +207,22 @@ const Router = (() => {
       document.getElementById("sideUser").innerHTML =
         UI.avatar(u.name, u.photo) + `<div><div class="name">${UI.esc(u.name)}</div><div class="role">${u.verified ? "✓ Verified " : ""}${u.role}</div></div>`;
       document.getElementById("hdrAvatar").innerHTML = UI.avatar(u.name, u.photo);
+    });
+
+    // Day/Night (Black/White) Theme toggle button handler
+    document.getElementById("themeToggleBtn")?.addEventListener("click", () => {
+      const current = document.documentElement.getAttribute("data-theme") || "light";
+      const next = current === "light" ? "dark" : "light";
+      if (typeof window.applyTheme === "function") {
+        window.applyTheme(next);
+      } else {
+        document.documentElement.setAttribute("data-theme", next);
+        localStorage.setItem("rtn_theme", next);
+        document.querySelectorAll(".theme-toggle-btn .theme-icon").forEach((el) => {
+          el.textContent = next === "light" ? "🌙" : "☀️";
+        });
+      }
+      UI.toast(next === "light" ? "☀️ White (Light) mode activated" : "🌙 Black (Dark) mode activated");
     });
 
     const showBal = () => API.getWallet().then((w) => {

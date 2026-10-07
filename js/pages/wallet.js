@@ -34,26 +34,32 @@
   let payoutNum = {};
   let depSel = "bKash", wdSel = "bKash";
 
-  Promise.all([API.getWallet(), API.getMe(), API.getTransactions()]).then(([w, u, txns]) => {
-    wallet = w;
-    me = u;
-    payoutNum = {
-      "bKash": u.bkash || "01609166109",
-      "Nagad": u.nagad || "01620576996",
-      "Binance Pay": u.binance || "1271861063"
-    };
+  const reloadWalletView = () => {
+    Promise.all([API.getWallet(), API.getMe(), API.getTransactions()]).then(([w, u, txns]) => {
+      wallet = w;
+      me = u;
+      payoutNum = {
+        "bKash": u.bkash || "01609166109",
+        "Nagad": u.nagad || "01620576996",
+        "Binance Pay": u.binance || "1271861063"
+      };
 
-    renderHero();
-    renderMethods();
-    renderHistory(txns);
+      renderHero();
+      renderMethods();
+      renderHistory(txns);
 
-    // Deep link tab handler (?tab=withdraw or ?tab=deposit)
-    const t = new URLSearchParams(location.search).get("tab");
-    if (t) {
-      const btn = document.querySelector(`#walletTabs [data-tab="${t}"]`);
-      btn?.click();
-    }
-  });
+      // Deep link tab handler (?tab=withdraw or ?tab=deposit)
+      const t = new URLSearchParams(location.search).get("tab");
+      if (t) {
+        const btn = document.querySelector(`#walletTabs [data-tab="${t}"]`);
+        btn?.click();
+      }
+    });
+  };
+
+  reloadWalletView();
+  document.addEventListener("wallet:updated", reloadWalletView);
+  document.addEventListener("transactions:updated", reloadWalletView);
 
   function renderHero() {
     const totalEarned = wallet.totalEarned || 0;

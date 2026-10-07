@@ -279,6 +279,9 @@ const API = (() => {
             store = JSON.parse(fresh);
             document.dispatchEvent(new CustomEvent("products:updated"));
             document.dispatchEvent(new CustomEvent("notifications:updated"));
+            document.dispatchEvent(new CustomEvent("wallet:updated"));
+            document.dispatchEvent(new CustomEvent("transactions:updated"));
+            document.dispatchEvent(new CustomEvent("orders:updated"));
           }
         } catch (err) {}
       }
@@ -303,12 +306,24 @@ const API = (() => {
             if (Array.isArray(remoteStore.transactions) && remoteStore.transactions.length > 0) {
               store.transactions = remoteStore.transactions;
             }
+            if (remoteStore.wallet && typeof remoteStore.wallet === "object") {
+              store.wallet = Object.assign(store.wallet || {}, remoteStore.wallet);
+            }
+            if (remoteStore.userWallets && typeof remoteStore.userWallets === "object") {
+              store.userWallets = Object.assign(store.userWallets || {}, remoteStore.userWallets);
+            }
+            if (Array.isArray(remoteStore.orders) && remoteStore.orders.length > 0) {
+              store.orders = remoteStore.orders;
+            }
             try {
               localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
             } catch (e) {}
 
             document.dispatchEvent(new CustomEvent("products:updated"));
             document.dispatchEvent(new CustomEvent("notifications:updated"));
+            document.dispatchEvent(new CustomEvent("wallet:updated"));
+            document.dispatchEvent(new CustomEvent("transactions:updated"));
+            document.dispatchEvent(new CustomEvent("orders:updated"));
 
             if (remPend > curPend) {
               playNotificationAudio("system");
@@ -370,15 +385,45 @@ const API = (() => {
     // Wallet & Platform Config
     getWallet() {
       return wait().then(() => {
+        if (!store.wallet) {
+          store.wallet = { balance: 0.0, pendingWithdraw: 0.0, totalEarned: 0.0, currency: "৳", minDeposit: 50, minWithdraw: 50 };
+        }
+
+        // Automatic ledger reconciliation: ensure wallet balance reflects approved deposits & earnings
+        if (Array.isArray(store.transactions) && store.transactions.length > 0) {
+          const totalDepositedTxns = store.transactions
+            .filter((t) => t.type === "deposit" && t.status === "success")
+            .reduce((sum, t) => sum + (Number(t.amount) || 0), 0);
+
+          const totalSpentTxns = store.transactions
+            .filter((t) => (t.type === "purchase" || t.type === "withdraw") && t.status === "success")
+            .reduce((sum, t) => sum + (Number(t.amount) || 0), 0);
+
+          const totalSalesEarned = store.transactions
+            .filter((t) => (t.type === "sale" || t.type === "commission") && t.status === "success")
+            .reduce((sum, t) => sum + (Number(t.amount) || 0), 0);
+
+          const expectedBalance = Math.max(0, Number((totalDepositedTxns + totalSalesEarned - totalSpentTxns).toFixed(2)));
+          if (expectedBalance > (store.wallet.balance || 0)) {
+            store.wallet.balance = expectedBalance;
+            store.wallet.totalDeposited = Number(totalDepositedTxns.toFixed(2));
+            saveLocal();
+          }
+        }
+
         if (Array.isArray(store.sellers)) {
           const currentUserName = (store.user && store.user.name || "").toLowerCase();
           const currentUserPhone = (store.user && store.user.whatsapp || "").replace(/[^0-9]/g, "");
           const mySeller = store.sellers.find((s) =>
-            s.name.toLowerCase() === currentUserName ||
+            (s.name && s.name.toLowerCase() === currentUserName) ||
             (currentUserPhone && s.whatsapp && s.whatsapp.replace(/[^0-9]/g, "") === currentUserPhone)
           );
-          if (mySeller && typeof mySeller.balance === "number" && mySeller.balance > store.wallet.balance) {
-            store.wallet.balance = mySeller.balance;
+          if (mySeller && typeof mySeller.balance === "number") {
+            if (mySeller.balance > (store.wallet.balance || 0)) {
+              store.wallet.balance = mySeller.balance;
+            } else if ((store.wallet.balance || 0) > mySeller.balance) {
+              mySeller.balance = store.wallet.balance;
+            }
             saveLocal();
           }
         }
@@ -1032,7 +1077,10 @@ const API = (() => {
           amount: amt,
           status: "pending", // goes to Admin for review
           date: new Date().toLocaleString(),
-          ref: ref || ("TRX" + Math.random().toString(36).slice(2, 8).toUpperCase())
+          ref: ref || ("TRX" + Math.random().toString(36).slice(2, 8).toUpperCase()),
+          userId: store.user?.id || "usr_rtn_01",
+          userName: store.user?.name || "User",
+          userPhone: (store.user?.whatsapp || number || "").replace(/[^0-9]/g, "")
         };
         store.transactions.unshift(txn);
         saveLocal();
@@ -1054,10 +1102,25 @@ const API = (() => {
         const txn = store.transactions.find((t) => t.id === txnId);
         if (txn && txn.type === "deposit" && txn.status === "pending") {
           txn.status = "success";
-          store.wallet.balance = Number((store.wallet.balance + txn.amount).toFixed(2));
+          store.wallet.balance = Number(((store.wallet.balance || 0) + txn.amount).toFixed(2));
           store.wallet.totalDeposited = Number(((store.wallet.totalDeposited || 0) + txn.amount).toFixed(2));
+
+          // Sync matching seller balance if user is also a seller
+          if (Array.isArray(store.sellers)) {
+            const uName = (txn.userName || store.user?.name || "").toLowerCase();
+            const uPhone = (txn.userPhone || txn.number || store.user?.whatsapp || "").replace(/[^0-9]/g, "");
+            const mySeller = store.sellers.find((s) =>
+              (uName && s.name && s.name.toLowerCase() === uName) ||
+              (uPhone && s.whatsapp && s.whatsapp.replace(/[^0-9]/g, "") === uPhone)
+            );
+            if (mySeller) {
+              mySeller.balance = store.wallet.balance;
+            }
+          }
+
           saveLocal();
           document.dispatchEvent(new CustomEvent("wallet:updated"));
+          document.dispatchEvent(new CustomEvent("transactions:updated"));
 
           addNotificationInternal({
             title: "📥 Deposit Confirmed! (ডিপোজিট সফল)",

@@ -3,7 +3,11 @@
   const table = document.getElementById("txnTable");
   let all = [], filter = "";
 
-  API.getTransactions().then((t) => { all = t; stats(); render(); });
+  const reloadTxns = () => {
+    API.getTransactions().then((t) => { all = t; stats(); render(); });
+  };
+  reloadTxns();
+  document.addEventListener("transactions:updated", reloadTxns);
 
   document.getElementById("txnFilter").addEventListener("click", (e) => {
     const p = e.target.closest(".pill"); if (!p) return;

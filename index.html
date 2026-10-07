@@ -5168,6 +5168,9 @@ const API = (() => {
             store = JSON.parse(fresh);
             document.dispatchEvent(new CustomEvent("products:updated"));
             document.dispatchEvent(new CustomEvent("notifications:updated"));
+            document.dispatchEvent(new CustomEvent("wallet:updated"));
+            document.dispatchEvent(new CustomEvent("transactions:updated"));
+            document.dispatchEvent(new CustomEvent("orders:updated"));
           }
         } catch (err) {}
       }
@@ -5192,12 +5195,24 @@ const API = (() => {
             if (Array.isArray(remoteStore.transactions) && remoteStore.transactions.length > 0) {
               store.transactions = remoteStore.transactions;
             }
+            if (remoteStore.wallet && typeof remoteStore.wallet === "object") {
+              store.wallet = Object.assign(store.wallet || {}, remoteStore.wallet);
+            }
+            if (remoteStore.userWallets && typeof remoteStore.userWallets === "object") {
+              store.userWallets = Object.assign(store.userWallets || {}, remoteStore.userWallets);
+            }
+            if (Array.isArray(remoteStore.orders) && remoteStore.orders.length > 0) {
+              store.orders = remoteStore.orders;
+            }
             try {
               localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
             } catch (e) {}
 
             document.dispatchEvent(new CustomEvent("products:updated"));
             document.dispatchEvent(new CustomEvent("notifications:updated"));
+            document.dispatchEvent(new CustomEvent("wallet:updated"));
+            document.dispatchEvent(new CustomEvent("transactions:updated"));
+            document.dispatchEvent(new CustomEvent("orders:updated"));
 
             if (remPend > curPend) {
               playNotificationAudio("system");
@@ -5259,15 +5274,45 @@ const API = (() => {
     // Wallet & Platform Config
     getWallet() {
       return wait().then(() => {
+        if (!store.wallet) {
+          store.wallet = { balance: 0.0, pendingWithdraw: 0.0, totalEarned: 0.0, currency: "৳", minDeposit: 50, minWithdraw: 50 };
+        }
+
+        // Automatic ledger reconciliation: ensure wallet balance reflects approved deposits & earnings
+        if (Array.isArray(store.transactions) && store.transactions.length > 0) {
+          const totalDepositedTxns = store.transactions
+            .filter((t) => t.type === "deposit" && t.status === "success")
+            .reduce((sum, t) => sum + (Number(t.amount) || 0), 0);
+
+          const totalSpentTxns = store.transactions
+            .filter((t) => (t.type === "purchase" || t.type === "withdraw") && t.status === "success")
+            .reduce((sum, t) => sum + (Number(t.amount) || 0), 0);
+
+          const totalSalesEarned = store.transactions
+            .filter((t) => (t.type === "sale" || t.type === "commission") && t.status === "success")
+            .reduce((sum, t) => sum + (Number(t.amount) || 0), 0);
+
+          const expectedBalance = Math.max(0, Number((totalDepositedTxns + totalSalesEarned - totalSpentTxns).toFixed(2)));
+          if (expectedBalance > (store.wallet.balance || 0)) {
+            store.wallet.balance = expectedBalance;
+            store.wallet.totalDeposited = Number(totalDepositedTxns.toFixed(2));
+            saveLocal();
+          }
+        }
+
         if (Array.isArray(store.sellers)) {
           const currentUserName = (store.user && store.user.name || "").toLowerCase();
           const currentUserPhone = (store.user && store.user.whatsapp || "").replace(/[^0-9]/g, "");
           const mySeller = store.sellers.find((s) =>
-            s.name.toLowerCase() === currentUserName ||
+            (s.name && s.name.toLowerCase() === currentUserName) ||
             (currentUserPhone && s.whatsapp && s.whatsapp.replace(/[^0-9]/g, "") === currentUserPhone)
           );
-          if (mySeller && typeof mySeller.balance === "number" && mySeller.balance > store.wallet.balance) {
-            store.wallet.balance = mySeller.balance;
+          if (mySeller && typeof mySeller.balance === "number") {
+            if (mySeller.balance > (store.wallet.balance || 0)) {
+              store.wallet.balance = mySeller.balance;
+            } else if ((store.wallet.balance || 0) > mySeller.balance) {
+              mySeller.balance = store.wallet.balance;
+            }
             saveLocal();
           }
         }
@@ -5922,7 +5967,10 @@ const API = (() => {
           amount: amt,
           status: "pending", // goes to Admin for review
           date: new Date().toLocaleString(),
-          ref: ref || ("TRX" + Math.random().toString(36).slice(2, 8).toUpperCase())
+          ref: ref || ("TRX" + Math.random().toString(36).slice(2, 8).toUpperCase()),
+          userId: store.user?.id || "usr_rtn_01",
+          userName: store.user?.name || "User",
+          userPhone: (store.user?.whatsapp || number || "").replace(/[^0-9]/g, "")
         };
         store.transactions.unshift(txn);
         saveLocal();
@@ -5944,10 +5992,25 @@ const API = (() => {
         const txn = store.transactions.find((t) => t.id === txnId);
         if (txn && txn.type === "deposit" && txn.status === "pending") {
           txn.status = "success";
-          store.wallet.balance = Number((store.wallet.balance + txn.amount).toFixed(2));
+          store.wallet.balance = Number(((store.wallet.balance || 0) + txn.amount).toFixed(2));
           store.wallet.totalDeposited = Number(((store.wallet.totalDeposited || 0) + txn.amount).toFixed(2));
+
+          // Sync matching seller balance if user is also a seller
+          if (Array.isArray(store.sellers)) {
+            const uName = (txn.userName || store.user?.name || "").toLowerCase();
+            const uPhone = (txn.userPhone || txn.number || store.user?.whatsapp || "").replace(/[^0-9]/g, "");
+            const mySeller = store.sellers.find((s) =>
+              (uName && s.name && s.name.toLowerCase() === uName) ||
+              (uPhone && s.whatsapp && s.whatsapp.replace(/[^0-9]/g, "") === uPhone)
+            );
+            if (mySeller) {
+              mySeller.balance = store.wallet.balance;
+            }
+          }
+
           saveLocal();
           document.dispatchEvent(new CustomEvent("wallet:updated"));
+          document.dispatchEvent(new CustomEvent("transactions:updated"));
 
           addNotificationInternal({
             title: "📥 Deposit Confirmed! (ডিপোজিট সফল)",
@@ -7567,7 +7630,7 @@ function applyTheme(theme) {
   document.documentElement.setAttribute("data-theme", theme);
   localStorage.setItem("rtn_theme", theme);
   document.querySelectorAll(".theme-toggle-btn .theme-icon").forEach((el) => {
-    el.textContent = theme === "light" ? "☀️" : "🌙";
+    el.textContent = theme === "light" ? "🌙" : "☀️";
   });
 }
 const savedTheme = localStorage.getItem("rtn_theme") || "light";
@@ -7634,6 +7697,10 @@ const Router = (() => {
     document.title = route.title;
     setActiveNav(route.nav);
     updatePendingBadge();
+    API.getWallet().then((w) => {
+      const hb = document.getElementById("hdrBalance");
+      if (hb) hb.textContent = UI.money(w.balance);
+    });
     const pageFn = INIT[name] || ((name === "" || name === "home" || name === "marketplace" || name === "browse") ? (INIT[""] || INIT["home"] || window.initHome) : null);
     if (typeof pageFn === "function") pageFn();
     window.scrollTo(0, 0);
@@ -7707,6 +7774,9 @@ const Router = (() => {
         <button class="btn btn-ghost btn-sm" onclick="window.UI && window.UI.openMetaAiBox && window.UI.openMetaAiBox()" title="Open Meta AI Assistant Box" style="color:#38bdf8; border:1px solid rgba(56,189,248,0.3); border-radius:20px; padding:4px 10px; display:inline-flex; align-items:center; gap:6px; background:rgba(0,100,224,0.12);">
           <img src="assets/meta-ai-logo.png" style="width:16px; height:16px; border-radius:50%;" class="meta-ai-orb-spin" alt="">
           <span class="fs12" style="font-weight:700;">AI Box</span>
+        </button>
+        <button class="icon-btn theme-toggle-btn" id="themeToggleBtn" title="Toggle Black / White Mode (ডার্ক / লাইট মোড)">
+          <span class="theme-icon">${(document.documentElement.getAttribute("data-theme") || localStorage.getItem("rtn_theme") || "light") === "light" ? "🌙" : "☀️"}</span>
         </button>
         <a href="#/wallet" class="balance-chip" title="Wallet balance (Deposit / DP)">
           ${ICONS.wallet}<span class="b-text" id="hdrBalance">৳0</span>
@@ -7786,6 +7856,14 @@ const Router = (() => {
       document.getElementById("sideUser").innerHTML =
         UI.avatar(u.name, u.photo) + `<div><div class="name">${UI.esc(u.name)}</div><div class="role">${u.verified ? "✓ Verified " : ""}${u.role}</div></div>`;
       document.getElementById("hdrAvatar").innerHTML = UI.avatar(u.name, u.photo);
+    });
+
+    // Day/Night (Black/White) Theme toggle button handler
+    document.getElementById("themeToggleBtn")?.addEventListener("click", () => {
+      const current = document.documentElement.getAttribute("data-theme") || "light";
+      const next = current === "light" ? "dark" : "light";
+      applyTheme(next);
+      UI.toast(next === "light" ? "☀️ White (Light) mode activated" : "🌙 Black (Dark) mode activated");
     });
 
     const showBal = () => API.getWallet().then((w) => {
@@ -9532,26 +9610,32 @@ function initWallet() {
   let payoutNum = {};
   let depSel = "bKash", wdSel = "bKash";
 
-  Promise.all([API.getWallet(), API.getMe(), API.getTransactions()]).then(([w, u, txns]) => {
-    wallet = w;
-    me = u;
-    payoutNum = {
-      "bKash": u.bkash || "01609166109",
-      "Nagad": u.nagad || "01620576996",
-      "Binance Pay": u.binance || "1271861063"
-    };
+  const reloadWalletView = () => {
+    Promise.all([API.getWallet(), API.getMe(), API.getTransactions()]).then(([w, u, txns]) => {
+      wallet = w;
+      me = u;
+      payoutNum = {
+        "bKash": u.bkash || "01609166109",
+        "Nagad": u.nagad || "01620576996",
+        "Binance Pay": u.binance || "1271861063"
+      };
 
-    renderHero();
-    renderMethods();
-    renderHistory(txns);
+      renderHero();
+      renderMethods();
+      renderHistory(txns);
 
-    // Deep link tab handler (?tab=withdraw or ?tab=deposit)
-    const t = new URLSearchParams(Router.queryStr()).get("tab");
-    if (t) {
-      const btn = document.querySelector(`#walletTabs [data-tab="${t}"]`);
-      btn?.click();
-    }
-  });
+      // Deep link tab handler (?tab=withdraw or ?tab=deposit)
+      const t = new URLSearchParams(Router.queryStr()).get("tab");
+      if (t) {
+        const btn = document.querySelector(`#walletTabs [data-tab="${t}"]`);
+        btn?.click();
+      }
+    });
+  };
+
+  reloadWalletView();
+  document.addEventListener("wallet:updated", reloadWalletView);
+  document.addEventListener("transactions:updated", reloadWalletView);
 
   function renderHero() {
     const totalEarned = wallet.totalEarned || 0;
@@ -9847,7 +9931,11 @@ function initTransactions() {
   const table = document.getElementById("txnTable");
   let all = [], filter = "";
 
-  API.getTransactions().then((t) => { all = t; stats(); render(); });
+  const reloadTxns = () => {
+    API.getTransactions().then((t) => { all = t; stats(); render(); });
+  };
+  reloadTxns();
+  document.addEventListener("transactions:updated", reloadTxns);
 
   document.getElementById("txnFilter").addEventListener("click", (e) => {
     const p = e.target.closest(".pill"); if (!p) return;
